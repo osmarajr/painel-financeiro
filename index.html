@@ -134,7 +134,7 @@ svg.chart g.hit{cursor:pointer}
     <div class="logo"><svg viewBox="0 0 24 24"><path d="M6 19v-7m6 7V5m6 14v-4"/></svg></div>
     <div><h1>Finanças</h1><p class="muted" style="margin-top:4px">Digite a senha para abrir o painel. Os dados são descriptografados só neste aparelho.</p></div>
     <label class="f">Senha<input id="senha" type="password" autocomplete="current-password" required></label>
-    <label class="chk"><input id="lembrar" type="checkbox">Lembrar neste aparelho</label>
+    <label class="chk"><input id="lembrar" type="checkbox">Lembrar neste aparelho por 7 dias</label>
     <div id="erro" class="erro" role="alert"></div>
     <button class="btn" id="entrar" type="submit">Abrir painel</button>
   </form>
@@ -178,6 +178,33 @@ const b64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 
 let D=null, senhaAtual=null;
 const S={aba:'mes',mes:null,ano:null,filtro:'todos',todasUlt:false};
+
+/* ---------- senha lembrada (expira) e bloqueio de tentativas ---------- */
+const DIAS_LEMBRAR=7, FALHAS_LIVRES=3;
+function lerLembrada(){
+  const raw=store.get('fin_senha');if(!raw)return null;
+  try{const o=JSON.parse(raw);if(o&&o.s&&o.t&&Date.now()-o.t<DIAS_LEMBRAR*864e5)return o.s}catch(e){}
+  store.del('fin_senha');return null;   // formato antigo, inválido ou vencido
+}
+const lembrarSenha=s=>store.set('fin_senha',JSON.stringify({s,t:Date.now()}));
+function estadoBloqueio(){try{return JSON.parse(store.get('fin_falhas')||'{}')}catch(e){return {}}}
+function segundosBloqueado(){const b=estadoBloqueio();return b.ate?Math.max(0,Math.ceil((b.ate-Date.now())/1000)):0}
+function registrarFalha(){
+  const b=estadoBloqueio(),n=(b.n||0)+1;
+  const espera=n>FALHAS_LIVRES?Math.min(900,5*Math.pow(2,n-FALHAS_LIVRES-1)):0;   // 5s, 10s, 20s ... até 15 min
+  store.set('fin_falhas',JSON.stringify({n,ate:espera?Date.now()+espera*1000:0}));
+}
+const limparFalhas=()=>store.del('fin_falhas');
+let timerBloqueio=null;
+function atualizarBloqueio(){
+  clearInterval(timerBloqueio);
+  const btn=$('#entrar'),tick=()=>{
+    const s=segundosBloqueado();
+    if(s>0){btn.disabled=true;btn.textContent='Aguarde '+(s>=60?Math.ceil(s/60)+' min':s+' s');$('#erro').textContent='Muitas tentativas erradas. Aguarde para tentar de novo.'}
+    else{clearInterval(timerBloqueio);btn.disabled=false;btn.textContent='Abrir painel';if($('#erro').textContent.startsWith('Muitas'))$('#erro').textContent=''}
+  };
+  if(segundosBloqueado()>0){tick();timerBloqueio=setInterval(tick,1000)}
+}
 
 /* ---------- descriptografia ---------- */
 async function abrir(senha){
@@ -309,15 +336,16 @@ function mostrarApp(){
 function mostrarLock(msg){$('#app').hidden=true;$('#lock').hidden=false;$('#erro').textContent=msg||'';$('#senha').focus()}
 
 async function entrar(senha,lembrar,silencioso){
+  if(segundosBloqueado()>0){atualizarBloqueio();return}
   const btn=$('#entrar');btn.disabled=true;btn.textContent='Abrindo…';
   try{
-    D=await abrir(senha);senhaAtual=senha;
-    if(lembrar)store.set('fin_senha',senha);
+    D=await abrir(senha);senhaAtual=senha;limparFalhas();
+    if(lembrar)lembrarSenha(senha);
     mostrarApp();
   }catch(e){
-    if(e.senha)store.del('fin_senha');
+    if(e.senha){store.del('fin_senha');registrarFalha()}
     mostrarLock(silencioso&&e.senha?'':e.message);
-  }finally{btn.disabled=false;btn.textContent='Abrir painel'}
+  }finally{if(segundosBloqueado()>0)atualizarBloqueio();else{btn.disabled=false;btn.textContent='Abrir painel'}}
 }
 
 /* ---------- eventos ---------- */
@@ -345,8 +373,8 @@ $('#sair').onclick=()=>{store.del('fin_senha');senhaAtual=null;D=null;$('#senha'
 /* ---------- início ---------- */
 (function(){
   if(!(window.crypto&&crypto.subtle)){mostrarLock('Este navegador não permite abrir o painel. Use a versão https do endereço e um navegador atualizado.');return}
-  const s=store.get('fin_senha');
-  if(s){$('#lembrar').checked=true;entrar(s,true,true)}else mostrarLock('');
+  const s=lerLembrada();
+  if(s&&segundosBloqueado()===0){$('#lembrar').checked=true;entrar(s,true,true)}else{mostrarLock('');atualizarBloqueio()}
 })();
 </script>
 </body>
